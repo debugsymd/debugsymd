@@ -154,6 +154,9 @@ linters:
     goconst:
       min-len: 2
       min-occurrences: 2
+      # Test tables legitimately repeat fixture strings; goconst targets
+      # duplicated magic strings in production logic, not test data.
+      ignore-tests: true
     mnd:
       # Buffer pre-sizing hints are estimates, not meaningful constants, so the
       # numeric arg to Grow/make carries no intent worth naming.
