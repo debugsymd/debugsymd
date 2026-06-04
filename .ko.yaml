@@ -1,0 +1,23 @@
+# ko build configuration — https://ko.build
+#
+# Builds the debugsymd binary and packages it into a minimal, static base image
+# with no Dockerfile. Build into the local Docker daemon with:
+#
+#     KO_DOCKER_REPO=ko.local ko build -B -t latest --local .
+#
+# or push to a registry by setting KO_DOCKER_REPO to it (see `make image-publish`).
+
+# chainguard/static is a tiny, regularly-rebuilt static base that runs as the
+# nonroot user 65532. Our binary is fully static (CGO disabled below).
+defaultBaseImage: cgr.dev/chainguard/static:latest
+
+builds:
+  - id: debugsymd
+    main: .
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s
+      - -w

@@ -1,0 +1,65 @@
+name: debugsymd
+
+services:
+  # The ko base image runs as nonroot (uid 65532), but a fresh named volume is
+  # owned by root. This one-shot init fixes the cache volume's ownership before
+  # the daemon starts, so the daemon can stay nonroot.
+  cache-perms:
+    image: busybox:1.37
+    user: "0:0"
+    command: ["chown", "-R", "65532:65532", "/cache"]
+    volumes:
+      - cache:/cache
+    restart: "no"
+
+  debugsymd:
+    # Built by `make image` (ko -> local Docker daemon). Override with a registry
+    # ref via DEBUGSYMD_IMAGE to run a published image instead.
+    image: ${DEBUGSYMD_IMAGE:-ko.local/debugsymd:latest}
+    user: "65532:65532"
+    depends_on:
+      cache-perms:
+        condition: service_completed_successfully
+    command:
+      - -bind=:8080
+      - -admin=:9090
+      - -cache-dir=/cache
+      - -cache-max-unused-for=${CACHE_MAX_UNUSED_FOR:-336h}
+      - -s3-bucket=${S3_BUCKET:?set S3_BUCKET in .env}
+      - -s3-region=${S3_REGION:-}
+      - -s3-endpoint-url=${S3_ENDPOINT_URL:-}
+      - -s3-key-prefix=${S3_KEY_PREFIX:-}
+      - -sentry-api-url=${SENTRY_API_URL:-}
+      - -sentry-org=${SENTRY_ORG:-}
+      - -sentry-project=${SENTRY_PROJECT:-}
+      - -log-level=${LOG_LEVEL:-info}
+      - -debuginfod=${DEBUGINFOD:-true}
+    environment:
+      # Secrets are mounted as files (Docker secrets) and referenced via the
+      # *_FILE convention, so they never land in the container env or in
+      # `docker inspect`. The SDK reads AWS keys from the shared-credentials file.
+      SENTRY_AUTH_TOKEN_FILE: /run/secrets/sentry_token
+      AWS_SHARED_CREDENTIALS_FILE: /run/secrets/aws_credentials
+      AWS_REGION: ${S3_REGION:-}
+    secrets:
+      - sentry_token
+      - aws_credentials # remove this (and below) if S3 auth comes from an instance role
+    ports:
+      - "${BIND_PORT:-8080}:8080" # public symstore + debuginfod
+      - "${ADMIN_PORT:-9090}:9090" # /healthz, /readyz, /metrics
+    volumes:
+      - cache:/cache
+    restart: unless-stopped
+
+volumes:
+  cache:
+
+secrets:
+  # Create these gitignored files (see README), mounted read-only at
+  # /run/secrets/<name> for the nonroot daemon:
+  #   secrets/sentry_token      -> the Sentry auth token, one line
+  #   secrets/aws_credentials   -> an AWS shared-credentials file ([default] profile)
+  sentry_token:
+    file: ./secrets/sentry_token
+  aws_credentials:
+    file: ./secrets/aws_credentials
