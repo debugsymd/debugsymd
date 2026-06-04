@@ -8,6 +8,12 @@
 *.so
 *.dylib
 
+# `make build` / `go build` output binary
+/debugsymd
+
+# Docker secret files (token, AWS credentials) — never commit these
+/secrets/
+
 # Test binary, built with `go test -c`
 *.test
 
