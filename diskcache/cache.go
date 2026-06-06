@@ -12,6 +12,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/debugsymd/debugsymd/metrics"
 )
 
 // Cache is a handle to a cache root directory. It is safe for concurrent use:
@@ -103,6 +105,12 @@ func (c *Cache) Commit(tmp *os.File, role, debugID, inner string) error {
 		return fmt.Errorf("fsyncing staging file: %w", err)
 	}
 
+	// Size is read before Close so it feeds the gauge delta below.
+	info, statErr := tmp.Stat()
+	if statErr != nil {
+		return fmt.Errorf("stat staging file: %w", statErr)
+	}
+
 	name := tmp.Name()
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("closing staging file: %w", err)
@@ -113,8 +121,23 @@ func (c *Cache) Commit(tmp *os.File, role, debugID, inner string) error {
 		return fmt.Errorf("creating cache shard dir: %w", err)
 	}
 
+	var oldSize int64
+
+	existed := false
+
+	if fi, err := os.Stat(final); err == nil {
+		oldSize = fi.Size()
+		existed = true
+	}
+
 	if err := os.Rename(name, final); err != nil {
 		return fmt.Errorf("committing cache entry: %w", err)
+	}
+
+	metrics.CacheSizeBytes.Add(float64(info.Size() - oldSize))
+
+	if !existed {
+		metrics.CacheEntries.Inc()
 	}
 
 	return nil

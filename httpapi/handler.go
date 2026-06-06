@@ -45,20 +45,15 @@ func (h *Handler) symstoreRoute(w http.ResponseWriter, r *http.Request) {
 	leading := r.PathValue("leading")
 	signature := r.PathValue("signature")
 	trailing := r.PathValue("trailing")
-	label := form(trailing)
 
 	if !strings.EqualFold(leading, trailing) {
-		recordRequest(http.StatusBadRequest, label)
 		http.Error(w, "leading and trailing filenames differ", http.StatusBadRequest)
-
 		return
 	}
 
 	req, serve, ok := symstore.Parse(leading, signature, trailing)
 	if !ok {
-		recordRequest(http.StatusNotFound, label)
 		http.NotFound(w, r)
-
 		return
 	}
 
@@ -69,32 +64,29 @@ func (h *Handler) symstoreRoute(w http.ResponseWriter, r *http.Request) {
 
 	file, info, err := fetch(r.Context(), req)
 	if err != nil {
-		h.fail(w, r, err, label)
+		h.fail(w, r, err)
 		return
 	}
 
 	if file == nil {
 		// nil file with no error shouldn't happen; treat as a miss, don't deref.
-		h.fail(w, r, objects.ErrNotFound, label)
+		h.fail(w, r, objects.ErrNotFound)
 		return
 	}
 
 	defer func() { _ = file.Close() }()
 
 	w.Header().Set("Content-Type", serve.ContentType)
-
-	rec := newStatusRecorder(w)
-	http.ServeContent(rec, r, req.Filename, info.ModTime(), file)
-	recordRequest(rec.status, label)
+	// w is the statusRecorder from withMetrics, so ServeContent's 200/206/304 is
+	// captured for the request metric without a local wrapper here.
+	http.ServeContent(w, r, req.Filename, info.ModTime(), file)
 }
 
 // fail maps a lookup error to a response: 404 for a miss, 503 (with Retry-After)
 // for a transient backend failure so debuggers back off rather than give up.
-func (h *Handler) fail(w http.ResponseWriter, r *http.Request, err error, label string) {
+func (h *Handler) fail(w http.ResponseWriter, r *http.Request, err error) {
 	if errors.Is(err, objects.ErrNotFound) {
-		recordRequest(http.StatusNotFound, label)
 		http.NotFound(w, r)
-
 		return
 	}
 
@@ -102,6 +94,5 @@ func (h *Handler) fail(w http.ResponseWriter, r *http.Request, err error, label 
 	// into a format string, so it cannot forge log entries.
 	slog.Error("symbol lookup failed", "error", err, "path", r.URL.Path)
 	w.Header().Set("Retry-After", retryAfterSeconds)
-	recordRequest(http.StatusServiceUnavailable, label)
 	http.Error(w, "symbol backend unavailable", http.StatusServiceUnavailable)
 }

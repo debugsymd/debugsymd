@@ -47,6 +47,18 @@ func run(args []string) error {
 		return fmt.Errorf("initializing cache: %w", cacheErr)
 	}
 
+	// Seed the cache gauges off the critical path: the walk can be slow on a large
+	// warm cache, so it runs concurrently with the storage/resolver setup below.
+	// We join on it before serving (and well before the first eviction sweep), so
+	// the seed's gauge Set happens-before any Commit or eviction delta.
+	seeded := make(chan struct{})
+
+	go func() {
+		defer close(seeded)
+
+		cache.SeedMetrics()
+	}()
+
 	go cache.RunEviction(ctx, evictionInterval, cfg.CacheMaxUnusedFor)
 
 	fetcher, fetcherErr := storage.NewS3(ctx, storage.S3Options{
@@ -72,6 +84,10 @@ func run(args []string) error {
 	// be writable (every served object is staged through it).
 	ready := func() bool { return cache.Probe() == nil }
 	server := httpapi.NewServer(cfg.Bind, cfg.Admin, handler, ready, cfg.Debuginfod)
+
+	// Block until the gauges are seeded so no request-driven Commit delta is
+	// clobbered by a late seed Set.
+	<-seeded
 
 	// #nosec G706 -- operator-supplied config logged as discrete slog fields
 	// (JSON-encoded), not request data spliced into a format string.

@@ -1,20 +1,46 @@
 package httpapi
 
 import (
-	"expvar"
+	"net/http"
 	"strconv"
-	"strings"
+	"time"
+
+	"github.com/debugsymd/debugsymd/metrics"
 )
 
-// requestsTotal counts handled requests keyed by "<status>:<form>", e.g.
-// "200:pd_" or "404:pdb". Exposed as JSON on the admin listener's /metrics.
-var requestsTotal = expvar.NewMap("debugsymd_requests_total")
+// formLabeler picks the bounded "form" metric label for a request.
+type formLabeler func(*http.Request) string
 
-func recordRequest(status int, form string) {
-	var b strings.Builder
-	b.Grow(len(form) + 4)
-	b.WriteString(strconv.Itoa(status))
-	b.WriteByte(':')
-	b.WriteString(form)
-	requestsTotal.Add(b.String(), 1)
+func withMetrics(form formLabeler, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		label := form(r)
+		rec := newStatusRecorder(w)
+
+		next(rec, r)
+
+		metrics.RequestDuration.WithLabelValues(label).Observe(time.Since(start).Seconds())
+		metrics.RequestsTotal.WithLabelValues(strconv.Itoa(rec.status), label).Inc()
+	}
+}
+
+// symstoreForm derives the label from the client-controlled trailing segment.
+func symstoreForm(r *http.Request) string {
+	return form(r.PathValue("trailing"))
+}
+
+// fixedForm builds a labeler that reports the same form for every request.
+func fixedForm(label string) formLabeler {
+	return func(*http.Request) string { return label }
+}
+
+// trackInFlight wraps a handler so the requests_in_flight gauge reflects the
+// number of requests currently being served.
+func trackInFlight(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		metrics.RequestsInFlight.Inc()
+		defer metrics.RequestsInFlight.Dec()
+
+		next.ServeHTTP(w, r)
+	})
 }

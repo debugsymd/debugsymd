@@ -11,10 +11,12 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"time"
 
 	"golang.org/x/sync/singleflight"
 
 	"github.com/debugsymd/debugsymd/diskcache"
+	"github.com/debugsymd/debugsymd/metrics"
 	"github.com/debugsymd/debugsymd/resolver"
 	"github.com/debugsymd/debugsymd/storage"
 )
@@ -47,25 +49,27 @@ func (s *Service) Fetch(ctx context.Context, req resolver.Request) (*os.File, fs
 func (s *Service) object(ctx context.Context, req resolver.Request) (*os.File, fs.FileInfo, error) {
 	id, inner := cacheKey(req)
 
-	if file, info, err := s.cache.Lookup(roleObjects, id, inner); err != nil {
+	file, info, err := s.cache.Lookup(roleObjects, id, inner)
+	if err != nil {
 		return nil, nil, fmt.Errorf("looking up cached object: %w", err)
-	} else if file != nil {
+	}
+
+	if file != nil {
+		metrics.CacheLookups.WithLabelValues(roleObjects, metrics.ResultHit).Inc()
 		return file, info, nil
 	}
 
-	// singleflight runs the closure under the first caller's context, so a single
-	// client disconnect would otherwise cancel the shared download and fail every
-	// coalesced follower too. Drop cancellation (keeping any context values) so
-	// the work is bound to the symbol, not to one requester.
-	work := context.WithoutCancel(ctx)
+	metrics.CacheLookups.WithLabelValues(roleObjects, metrics.ResultMiss).Inc()
 
-	if _, err, _ := s.group.Do(flightKey(roleObjects, id, inner), func() (any, error) {
-		return nil, s.download(work, req)
+	if err := s.produceOnce(ctx, flightKey(roleObjects, id, inner), func(ctx context.Context) error {
+		return s.download(ctx, req)
 	}); err != nil {
-		return nil, nil, fmt.Errorf("downloading object: %w", err)
+		return nil, nil, err
 	}
 
-	file, info, err := s.cache.Lookup(roleObjects, id, inner)
+	// Re-open the freshly committed entry. This always hits and is not counted
+	// as a lookup — the hit/miss above already classified the request.
+	file, info, err = s.cache.Lookup(roleObjects, id, inner)
 	if err != nil {
 		return nil, nil, fmt.Errorf("opening downloaded object: %w", err)
 	}
@@ -73,18 +77,59 @@ func (s *Service) object(ctx context.Context, req resolver.Request) (*os.File, f
 	return file, info, nil
 }
 
+// produceOnce runs produce under singleflight keyed by flightKey, coalescing
+// concurrent callers for the same key into a single execution. It records a
+// coalesced request for every caller that was served by another caller's
+// in-flight work — that is, callers whose produce closure never ran. The
+// executor that actually did the backend work is never counted, even though
+// singleflight reports shared=true to it once duplicates exist.
+//
+// The closure runs under a context with cancellation dropped (values kept): the
+// shared work is bound to the symbol, not to the first requester, so one client
+// disconnecting must not cancel the download and fail every coalesced follower.
+func (s *Service) produceOnce(ctx context.Context, key string, produce func(context.Context) error) error {
+	work := context.WithoutCancel(ctx)
+
+	executed := false
+
+	_, err, _ := s.group.Do(key, func() (any, error) {
+		executed = true
+		return nil, produce(work)
+	})
+	if err != nil {
+		return fmt.Errorf("producing cache entry: %w", err)
+	}
+
+	if !executed {
+		metrics.SingleflightCoalescedTotal.Inc()
+	}
+
+	return nil
+}
+
 // download resolves the object's location, streams it from the blob store into
 // a staging file, and commits it to the objects cache. It streams throughout —
 // a multi-GB object is never held in memory.
 func (s *Service) download(ctx context.Context, req resolver.Request) error {
+	resolveStart := time.Now()
 	loc, err := s.resolver.Lookup(ctx, req)
+	resolveSeconds := time.Since(resolveStart).Seconds()
+
 	if errors.Is(err, resolver.ErrNotFound) {
+		metrics.ResolverRequests.WithLabelValues(metrics.ResultNotFound).Inc()
 		return ErrNotFound
 	}
 
 	if err != nil {
+		metrics.ResolverRequests.WithLabelValues(metrics.ResultError).Inc()
 		return fmt.Errorf("resolving %q: %w", req.Filename, err)
 	}
+
+	// Observe only successful lookups: a not-found (fast, common) or an error
+	// (e.g. a slow timeout) would otherwise skew the success-latency percentiles
+	// the histogram exists to track. The result counts live in ResolverRequests.
+	metrics.ResolverRequests.WithLabelValues(metrics.ResultOK).Inc()
+	metrics.ResolverDuration.Observe(resolveSeconds)
 
 	tmp, tmpErr := s.cache.NewTemp()
 	if tmpErr != nil {
@@ -100,13 +145,26 @@ func (s *Service) download(ctx context.Context, req resolver.Request) error {
 		}
 	}()
 
-	if _, err := s.fetcher.Fetch(ctx, loc.Bucket, loc.Key, tmp); err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
+	fetchStart := time.Now()
+	n, fetchErr := s.fetcher.Fetch(ctx, loc.Bucket, loc.Key, tmp)
+	fetchSeconds := time.Since(fetchStart).Seconds()
+
+	if fetchErr != nil {
+		// A missing key is an upstream inconsistency, not a backend fault, so it
+		// is mapped to 404 and excluded from the storage error counter.
+		if errors.Is(fetchErr, storage.ErrNotFound) {
 			return ErrNotFound
 		}
 
-		return fmt.Errorf("fetching object bytes: %w", err)
+		metrics.StorageErrorsTotal.Inc()
+
+		return fmt.Errorf("fetching object bytes: %w", fetchErr)
 	}
+
+	// Observe only successful, complete fetches so a partial transfer that
+	// errored out does not distort the download-latency percentiles.
+	metrics.StorageFetchDuration.Observe(fetchSeconds)
+	metrics.StorageBytesDownloaded.Add(float64(n))
 
 	id, inner := cacheKey(req)
 	if err := s.cache.Commit(tmp, roleObjects, id, inner); err != nil {
