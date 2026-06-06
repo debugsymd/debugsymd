@@ -6,10 +6,11 @@ package httpapi
 import (
 	"context"
 	"errors"
-	"expvar"
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/debugsymd/debugsymd/metrics"
 )
 
 const (
@@ -31,13 +32,13 @@ func NewServer(bind, admin string, h *Handler, ready func() bool, debuginfod boo
 	public := http.NewServeMux()
 	// A GET pattern also matches HEAD in ServeMux, and ServeContent emits a
 	// bodyless HEAD response, so one registration covers both.
-	public.HandleFunc("GET /{leading}/{signature}/{trailing}", h.symstoreRoute)
+	public.HandleFunc("GET /{leading}/{signature}/{trailing}", withMetrics(symstoreForm, h.symstoreRoute))
 
 	if debuginfod {
 		// Literal final segments keep these from shadowing the 3-segment symstore route.
-		public.HandleFunc("GET /buildid/{buildid}/debuginfo", h.debuginfodDebug)
-		public.HandleFunc("GET /buildid/{buildid}/executable", h.debuginfodExecutable)
-		public.HandleFunc("GET /buildid/{buildid}/source/{srcpath...}", h.debuginfodSource)
+		public.HandleFunc("GET /buildid/{buildid}/debuginfo", withMetrics(fixedForm("debuginfo"), h.debuginfodDebug))
+		public.HandleFunc("GET /buildid/{buildid}/executable", withMetrics(fixedForm("executable"), h.debuginfodExecutable))
+		public.HandleFunc("GET /buildid/{buildid}/source/{srcpath...}", withMetrics(fixedForm("source"), h.debuginfodSource))
 	}
 
 	adminMux := http.NewServeMux()
@@ -52,10 +53,10 @@ func NewServer(bind, admin string, h *Handler, ready func() bool, debuginfod boo
 
 		_, _ = io.WriteString(w, "ready\n")
 	})
-	adminMux.Handle("GET /metrics", expvar.Handler())
+	adminMux.Handle("GET /metrics", metrics.Handler())
 
 	return &Server{
-		public: &http.Server{Addr: bind, Handler: public, ReadHeaderTimeout: readHeaderTimeout},
+		public: &http.Server{Addr: bind, Handler: trackInFlight(public), ReadHeaderTimeout: readHeaderTimeout},
 		admin:  &http.Server{Addr: admin, Handler: adminMux, ReadHeaderTimeout: readHeaderTimeout},
 	}
 }

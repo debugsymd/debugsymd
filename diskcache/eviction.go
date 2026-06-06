@@ -2,13 +2,13 @@ package diskcache
 
 import (
 	"context"
-	"fmt"
 	"io/fs"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"slices"
 	"time"
+
+	"github.com/debugsymd/debugsymd/metrics"
 )
 
 // Evict removes every cache file whose modification time is older than
@@ -18,44 +18,51 @@ import (
 // sweep it prunes the now-empty shard directories so a long-lived, high-churn
 // cache does not accumulate empty <role>/<hh>/<hh> trees.
 func (c *Cache) Evict(maxUnused time.Duration) (int, error) {
-	cutoff := time.Now().Add(-maxUnused)
-	tmpDir := filepath.Join(c.root, tmpSubdir)
+	start := time.Now()
+	cutoff := start.Add(-maxUnused)
 
 	var (
-		removed int
-		dirs    []string
+		removed        int
+		removedEntries int64
+		removedBytes   int64
+		dirs           []string
 	)
 
-	walkErr := filepath.WalkDir(c.root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
+	walkErr := c.walkFiles(func(path string, info fs.FileInfo, inTmp bool) {
+		// Only entries past the cutoff are swept.
+		if !info.ModTime().Before(cutoff) {
+			return
+		}
+		// #nosec G122 -- the cache root is operator-owned, holding only files debugsymd
+		// writes itself (sha256-named, no symlinks), so there is no TOCTOU symlink to race.
+		if os.Remove(path) != nil {
+			return
 		}
 
-		if d.IsDir() {
-			// The root and the tmp staging dir are structural — never prune them;
-			// tmp in particular must exist for NewTemp to stage future writes.
-			if path != c.root && path != tmpDir {
-				dirs = append(dirs, path)
-			}
+		removed++
 
-			return nil
+		// Staging files under tmp were never counted in the size/entry gauges,
+		// so only committed entries adjust them on removal.
+		if !inTmp {
+			removedEntries++
+			removedBytes += info.Size()
 		}
-		// d.Info errors only if the entry vanished (raced another remover): nothing to evict.
-		if info, infoErr := d.Info(); infoErr == nil && info.ModTime().Before(cutoff) {
-			// #nosec G122 -- the cache root is operator-owned, holding only files debugsymd
-			// writes itself (sha256-named, no symlinks), so there is no TOCTOU symlink to race.
-			if os.Remove(path) == nil {
-				removed++
-			}
-		}
-
-		return nil
+	}, func(path string) {
+		// The root and the tmp staging dir are skipped by walkFiles; every other
+		// directory is a prune candidate once its entries are gone.
+		dirs = append(dirs, path)
 	})
 	if walkErr != nil {
-		return removed, fmt.Errorf("walking cache dir: %w", walkErr)
+		return removed, walkErr
 	}
 
 	pruneEmptyDirs(dirs)
+
+	metrics.CacheSizeBytes.Sub(float64(removedBytes))
+	metrics.CacheEntries.Sub(float64(removedEntries))
+	metrics.CacheEvictedTotal.Add(float64(removedEntries))
+	metrics.CacheEvictionDuration.Observe(time.Since(start).Seconds())
+	metrics.CacheLastEvictionTimestamp.SetToCurrentTime()
 
 	return removed, nil
 }

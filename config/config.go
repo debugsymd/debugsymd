@@ -13,7 +13,7 @@ import (
 type Config struct {
 	// Bind is the address the public symstore listener binds to.
 	Bind string
-	// Admin is the metrics/health listener (expvar, /healthz, /readyz), kept off
+	// Admin is the metrics/health listener (Prometheus /metrics, /healthz, /readyz), kept off
 	// the public surface on purpose.
 	Admin string
 

@@ -4,7 +4,7 @@ import "strings"
 
 // knownForms bounds the cardinality of the metric label produced by form. The
 // label is derived from the request's (attacker-controlled) trailing path
-// segment, so without an allowlist the expvar map keyed on it would grow without
+// segment, so without an allowlist the counter map keyed on it would grow without
 // bound — a memory-exhaustion vector on the public listener. Only the symbol
 // forms debugsymd actually serves get their own label; everything else collapses
 // to "other".

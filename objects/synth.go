@@ -6,8 +6,10 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"time"
 
 	"github.com/debugsymd/debugsymd/cab"
+	"github.com/debugsymd/debugsymd/metrics"
 	"github.com/debugsymd/debugsymd/resolver"
 )
 
@@ -26,41 +28,48 @@ func (s *Service) FetchCompressed(ctx context.Context, req resolver.Request) (*o
 	id, inner := cacheKey(req)
 
 	// Fast path: already mirrored or synthesized.
-	if file, info, err := s.lookupCompressed(id, inner); err != nil || file != nil {
-		return file, info, err
+	file, info, role, err := s.lookupCompressed(id, inner)
+	if err != nil {
+		return nil, nil, err
 	}
+
+	if file != nil {
+		metrics.CacheLookups.WithLabelValues(role, metrics.ResultHit).Inc()
+		return file, info, nil
+	}
+
+	metrics.CacheLookups.WithLabelValues(labelCompressed, metrics.ResultMiss).Inc()
 
 	// Produce it once across concurrent callers, then re-open whichever role the
 	// producer populated (raw_compressed if the upstream was a CAB, else cab_synth).
-	// Decouple the shared synthesis from any single caller's context (see object):
-	// a client disconnect must not fail the other coalesced callers.
-	work := context.WithoutCancel(ctx)
-
-	if _, err, _ := s.group.Do(flightKey(roleCabSynth, id, inner), func() (any, error) {
-		return nil, s.synthesize(work, req)
+	if err := s.produceOnce(ctx, flightKey(roleCabSynth, id, inner), func(ctx context.Context) error {
+		return s.synthesize(ctx, req)
 	}); err != nil {
-		return nil, nil, fmt.Errorf("synthesizing cabinet: %w", err)
+		return nil, nil, err
 	}
 
-	return s.lookupCompressed(id, inner)
+	// Re-open is always a hit and is not counted (see object).
+	file, info, _, err = s.lookupCompressed(id, inner)
+
+	return file, info, err
 }
 
 // lookupCompressed returns the cached compressed form for the (id, inner) cache
-// key from the raw_compressed mirror or, failing that, the cab_synth cache. A
-// miss in both returns (nil, nil, nil).
-func (s *Service) lookupCompressed(id, inner string) (*os.File, fs.FileInfo, error) {
+// key from the raw_compressed mirror or, failing that, the cab_synth cache,
+// along with the role that served it. A miss in both returns ("", nil, nil, nil).
+func (s *Service) lookupCompressed(id, inner string) (*os.File, fs.FileInfo, string, error) {
 	for _, role := range []string{roleRawCompressed, roleCabSynth} {
 		file, info, err := s.cache.Lookup(role, id, inner)
 		if err != nil {
-			return nil, nil, fmt.Errorf("looking up %s cache: %w", role, err)
+			return nil, nil, "", fmt.Errorf("looking up %s cache: %w", role, err)
 		}
 
 		if file != nil {
-			return file, info, nil
+			return file, info, role, nil
 		}
 	}
 
-	return nil, nil, nil
+	return nil, nil, "", nil
 }
 
 // synthesize ensures the raw object is cached, then either promotes it to the
@@ -106,8 +115,15 @@ func (s *Service) synthesize(ctx context.Context, req resolver.Request) error {
 		}
 
 		role = roleRawCompressed
-	} else if err := cab.Write(tmp, req.Filename, info.Size(), obj); err != nil {
-		return fmt.Errorf("synthesizing cabinet: %w", err)
+	} else {
+		synthStart := time.Now()
+
+		if err := cab.Write(tmp, req.Filename, info.Size(), obj); err != nil {
+			return fmt.Errorf("synthesizing cabinet: %w", err)
+		}
+
+		metrics.CABSynthDuration.Observe(time.Since(synthStart).Seconds())
+		metrics.CABSynthBytesTotal.Add(float64(info.Size()))
 	}
 
 	id, inner := cacheKey(req)
