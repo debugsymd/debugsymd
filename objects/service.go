@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"time"
 
@@ -56,10 +57,13 @@ func (s *Service) object(ctx context.Context, req resolver.Request) (*os.File, f
 
 	if file != nil {
 		metrics.CacheLookups.WithLabelValues(roleObjects, metrics.ResultHit).Inc()
+		slog.InfoContext(ctx, "object cache hit", "id", id, "inner", inner)
+
 		return file, info, nil
 	}
 
 	metrics.CacheLookups.WithLabelValues(roleObjects, metrics.ResultMiss).Inc()
+	slog.InfoContext(ctx, "object cache miss, downloading", "id", id, "inner", inner)
 
 	if err := s.produceOnce(ctx, flightKey(roleObjects, id, inner), func(ctx context.Context) error {
 		return s.download(ctx, req)
@@ -117,6 +121,8 @@ func (s *Service) download(ctx context.Context, req resolver.Request) error {
 
 	if errors.Is(err, resolver.ErrNotFound) {
 		metrics.ResolverRequests.WithLabelValues(metrics.ResultNotFound).Inc()
+		slog.InfoContext(ctx, "resolver: object not found", "filename", req.Filename)
+
 		return ErrNotFound
 	}
 
@@ -130,6 +136,14 @@ func (s *Service) download(ctx context.Context, req resolver.Request) error {
 	// the histogram exists to track. The result counts live in ResolverRequests.
 	metrics.ResolverRequests.WithLabelValues(metrics.ResultOK).Inc()
 	metrics.ResolverDuration.Observe(resolveSeconds)
+
+	slog.InfoContext(ctx, "resolved object",
+		"filename", req.Filename,
+		"bucket", loc.Bucket,
+		"key", loc.Key,
+		"size", loc.Size,
+		"resolve_seconds", resolveSeconds,
+	)
 
 	tmp, tmpErr := s.cache.NewTemp()
 	if tmpErr != nil {
@@ -165,6 +179,12 @@ func (s *Service) download(ctx context.Context, req resolver.Request) error {
 	// errored out does not distort the download-latency percentiles.
 	metrics.StorageFetchDuration.Observe(fetchSeconds)
 	metrics.StorageBytesDownloaded.Add(float64(n))
+
+	slog.InfoContext(ctx, "fetched object bytes",
+		"key", loc.Key,
+		"bytes", n,
+		"fetch_seconds", fetchSeconds,
+	)
 
 	id, inner := cacheKey(req)
 	if err := s.cache.Commit(tmp, roleObjects, id, inner); err != nil {

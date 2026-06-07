@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"log/slog"
 	"net/http"
 
 	"github.com/debugsymd/debugsymd/objects"
@@ -36,6 +37,12 @@ func (h *Handler) serveELF(w http.ResponseWriter, r *http.Request, ft resolver.F
 		return
 	}
 
+	slog.InfoContext(r.Context(), "debuginfod request",
+		"build_id", req.CodeID,
+		"file_type", ft,
+		"filename", req.Filename,
+	)
+
 	file, info, err := h.objects.Fetch(r.Context(), req)
 	if err != nil {
 		h.fail(w, r, err)
@@ -68,6 +75,11 @@ func (h *Handler) debuginfodSource(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+
+	slog.InfoContext(r.Context(), "debuginfod source request",
+		"build_id", req.CodeID,
+		"source_path", srcPath,
+	)
 
 	data, err := h.objects.SourceFile(r.Context(), req, srcPath)
 	if err != nil {
