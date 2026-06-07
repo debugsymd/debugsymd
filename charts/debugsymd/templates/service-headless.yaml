@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "debugsymd.headlessName" . }}
+  labels:
+    {{- include "debugsymd.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    {{- include "debugsymd.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: public
+      port: {{ .Values.service.port }}
+      targetPort: public
+      protocol: TCP
+    - name: admin
+      port: {{ .Values.adminService.port }}
+      targetPort: admin
+      protocol: TCP

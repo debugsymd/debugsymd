@@ -1,0 +1,306 @@
+# Default values for debugsymd.
+# This is a YAML-formatted file.
+
+# Container image. ko publishes docker.io/bosiakov/debugsymd with tags
+# `latest` and `sha-<12>`.
+image:
+  repository: docker.io/bosiakov/debugsymd
+  # Image tag. Empty defaults to .Chart.AppVersion. Pin to an immutable
+  # sha-<12> tag in production; `latest` is for dev only.
+  tag: ""
+  # Pull policy. Use Always only if you deploy a mutable tag like `latest`.
+  pullPolicy: IfNotPresent
+
+# References to secrets for pulling the image from a private registry,
+# e.g. [{ name: ghcr-pull }].
+imagePullSecrets: []
+
+# Number of replicas. Each replica owns its own RWO cache PVC; scaling is
+# horizontal cache partitioning, not a shared cache.
+replicaCount: 1
+
+# Override the chart name portion of resource names.
+nameOverride: ""
+# Fully override the generated resource name.
+fullnameOverride: ""
+
+# How many old ControllerRevisions to retain.
+revisionHistoryLimit: 3
+# Pod management policy. Parallel is safe — caches are independent per-pod.
+podManagementPolicy: Parallel
+# StatefulSet update strategy.
+updateStrategy:
+  type: RollingUpdate
+
+# Daemon flags
+
+# Public symstore + debuginfod listener address (-bind).
+bind: ":8080"
+# Admin (health/readiness/metrics) listener address (-admin).
+admin: ":9090"
+# Log level (-log-level): debug | info | warn | error.
+logLevel: info
+# Serve debuginfod /buildid/... routes (-debuginfod).
+debuginfod: true
+
+cache:
+  # On-disk cache root (-cache-dir). Must match the cache volume mountPath.
+  dir: /var/cache/debugsymd
+  # Evict cache entries untouched for longer than this (-cache-max-unused-for).
+  maxUnusedFor: 336h
+
+s3:
+  # S3 bucket holding the symbol store (-s3-bucket). REQUIRED — install fails
+  # if empty.
+  bucket: ""
+  # S3 region (-s3-region). Also exported as AWS_REGION when set.
+  region: ""
+  # S3-compatible endpoint URL (-s3-endpoint-url), e.g. MinIO/Ceph. Empty for AWS.
+  endpointUrl: ""
+  # Optional prefix for derived blob keys (-s3-key-prefix).
+  keyPrefix: ""
+
+sentry:
+  # Sentry API base URL (-sentry-api-url). When set, org, project, and a
+  # token source are REQUIRED.
+  apiUrl: ""
+  # Sentry organization slug (-sentry-org).
+  org: ""
+  # Sentry project slug (-sentry-project).
+  project: ""
+  # Token is delivered to the daemon via SENTRY_AUTH_TOKEN_FILE (a mounted file).
+  token:
+    # Create a Secret from `value`. Prefer existingSecret for production.
+    create: false
+    # Token value, used only when create=true. Avoid plain values.yaml; pass
+    # via --set or a secrets manager.
+    value: ""
+    # Name of a pre-existing Secret holding the token (preferred for prod).
+    existingSecret: ""
+    # Key within the Secret that holds the raw token.
+    key: token
+
+# AWS auth. IRSA is the default (annotate serviceAccount). Optionally mount a
+# shared-credentials Secret file instead.
+aws:
+  # AWS region (AWS_REGION). Defaults to s3.region when empty.
+  region: ""
+  credentials:
+    # Name of a pre-existing Secret holding an AWS shared-credentials file.
+    # When set, it is mounted and wired via AWS_SHARED_CREDENTIALS_FILE. Leave
+    # empty to rely on IRSA / instance role / the default AWS chain.
+    existingSecret: ""
+    # Key within the Secret holding the [default]-profile credentials file.
+    key: credentials
+
+# Per-replica RWO cache. enabled=false uses an emptyDir (cache is regenerable
+# from S3, but the warm cache is lost on pod restart).
+persistence:
+  enabled: true
+  # StorageClass. "" uses the cluster default; "-" disables dynamic provisioning.
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
+  size: 20Gi
+  annotations: {}
+
+# Public Service for the symstore/debuginfod listener (:8080).
+service:
+  # Service type: ClusterIP or LoadBalancer.
+  type: ClusterIP
+  port: 8080
+  annotations: {}
+  # Restrict source ranges (LoadBalancer only).
+  loadBalancerSourceRanges: []
+
+# Optional ClusterIP Service for the admin listener (:9090). Probes are
+# kubelet-direct and do not need this; enable for in-cluster scrape/debug.
+adminService:
+  enabled: false
+  port: 9090
+
+# Optional Ingress for the public listener.
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: debugsymd.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  # TLS config, e.g. [{ secretName: debugsymd-tls, hosts: [debugsymd.example.com] }].
+  tls: []
+
+serviceAccount:
+  # Create a ServiceAccount.
+  create: true
+  # Name to use. Generated from the fullname when empty.
+  name: ""
+  # Annotations, e.g. IRSA: eks.amazonaws.com/role-arn: arn:aws:iam::<acct>:role/debugsymd.
+  annotations: {}
+
+# Mount the ServiceAccount token. Defaults to false to reduce attack surface;
+# it is automatically enabled when an IRSA role-arn annotation is present on the
+# ServiceAccount (the projected web-identity token rides this volume). Set true
+# explicitly for other token-based auth (e.g. EKS Pod Identity).
+automountServiceAccountToken: false
+
+# Pod-level security context. fsGroup makes the CSI-provisioned cache PVC
+# group-writable by the nonroot daemon (uid/gid 65532).
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  fsGroupChangePolicy: OnRootMismatch
+  seccompProfile:
+    type: RuntimeDefault
+
+# Container-level security context. The only writable path needed is the
+# cache volume, so the root filesystem is read-only.
+containerSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  seccompProfile:
+    type: RuntimeDefault
+  capabilities:
+    drop:
+      - ALL
+
+# Fallback init container that chowns the cache dir to 65532:65532. Only
+# needed on storage classes where fsGroup is ignored (some hostPath/NFS drivers).
+# Symptom that you need it: /readyz returns 503 with a cache permission error.
+initChown:
+  enabled: false
+  image: busybox:1.37
+
+# Liveness probe (admin listener).
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: admin
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 2
+  failureThreshold: 3
+
+# Readiness probe (admin listener). /readyz fails when the cache is not writable.
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: admin
+  initialDelaySeconds: 3
+  periodSeconds: 10
+  timeoutSeconds: 2
+  failureThreshold: 3
+
+# Startup probe to tolerate slow cold start / volume attach.
+startupProbe:
+  enabled: true
+  httpGet:
+    path: /healthz
+    port: admin
+  periodSeconds: 5
+  failureThreshold: 30
+
+# The hot paths stream in 32 KiB chunks (CAB synthesis, S3 fetch, sendfile
+# serving), so memory stays flat regardless of object size. The dominant cost is
+# CPU: deflate during CAB synthesis on cache misses, with no concurrency cap.
+# CPU has no limit by default so cold-miss bursts aren't throttled.
+resources:
+  requests:
+    cpu: 500m
+    memory: 256Mi
+  limits:
+    memory: 1Gi
+
+# Go runtime tuning.
+goRuntime:
+  # GOMEMLIMIT — a soft GC target that makes Go collect aggressively before the
+  # cgroup OOM-kills the pod. By default it is derived as 90% of
+  # resources.limits.memory. Set memLimit explicitly (Go syntax, e.g. "900MiB")
+  # to override, or memLimitAuto=false to disable.
+  memLimit: ""
+  memLimitAuto: true
+  # GOMAXPROCS — empty uses the Go default (the node's core count). Set this to
+  # your CPU limit if you configure one, to avoid GC/scheduler overhead.
+  maxProcs: ""
+
+# Node selector.
+nodeSelector: {}
+# Tolerations.
+tolerations: []
+# Affinity.
+affinity: {}
+# Topology spread constraints.
+topologySpreadConstraints: []
+# PriorityClass name.
+priorityClassName: ""
+# Grace period for shutdown (server drains within 10s).
+terminationGracePeriodSeconds: 30
+
+# Extra pod annotations.
+podAnnotations: {}
+# Extra pod labels.
+podLabels: {}
+
+# Horizontal Pod Autoscaler. Off by default: each scaled-out replica starts
+# with a cold cache PVC, so CPU-based scaling has a warmup cost.
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 80
+
+# PodDisruptionBudget. Useful when replicaCount > 1.
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+  # maxUnavailable: 1
+
+# NetworkPolicy restricting INGRESS to the pods. Egress is intentionally left
+# unrestricted so the daemon can reach S3, Sentry, and DNS — add your own
+# egress policy if you need to lock that down.
+networkPolicy:
+  enabled: false
+  # Peers allowed to reach the public symstore/debuginfod port. Empty allows
+  # from anywhere (e.g. an ingress controller or LoadBalancer in any namespace).
+  # Provide NetworkPolicyPeer entries to restrict, e.g.:
+  #   - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: ingress-nginx } }
+  publicIngress: []
+  # Peers allowed to reach the admin port (/healthz, /readyz, /metrics). Empty
+  # restricts to the same namespace only. To scrape from another namespace (e.g.
+  # Prometheus), add its namespaceSelector here, e.g.:
+  #   - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: monitoring } }
+  adminIngress: []
+
+# Prometheus Operator ServiceMonitor for the admin /metrics endpoint, which
+# serves the Prometheus exposition format via client_golang (debugsymd_-namespaced
+# request/cache/storage/resolver/cab series plus Go runtime and process
+# collectors). Enabling this also provisions the admin Service it scrapes.
+serviceMonitor:
+  enabled: false
+  # Scrape path on the admin listener.
+  path: /metrics
+  # Scrape scheme.
+  scheme: http
+  # Scrape interval and per-scrape timeout.
+  interval: 30s
+  scrapeTimeout: 10s
+  # Preserve target-exposed label values on collision.
+  honorLabels: false
+  # Extra labels on the ServiceMonitor, e.g. to match your Prometheus
+  # serviceMonitorSelector ({ release: kube-prometheus-stack }).
+  labels: {}
+  # Namespace to create the ServiceMonitor in. Defaults to the release namespace.
+  namespace: ""
+  # Limit which namespaces Prometheus searches for the target Service.
+  namespaceSelector: {}
+  # Relabeling rules applied before the scrape.
+  relabelings: []
+  # Relabeling rules applied to scraped samples.
+  metricRelabelings: []

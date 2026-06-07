@@ -15,6 +15,9 @@ env:
   # same version locally. This release is built with Go >= 1.26, so its prebuilt
   # binary loads this `go 1.26` module.
   GOLANGCI_LINT_VERSION: v2.12.2
+  # Pinned for reproducibility (same rationale) — bump deliberately.
+  HELM_VERSION: v4.2.0
+  KUBECONFORM_VERSION: v0.8.0
 
 jobs:
   test:
@@ -135,4 +138,103 @@ jobs:
         with:
           subject-name: ${{ env.KO_DOCKER_REPO }}
           subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+  chart-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: helm lint
+        run: helm lint charts/debugsymd --set s3.bucket=ci-validation
+
+      - name: Validate rendered manifests (kubeconform)
+        run: |
+          curl -fsSLo kubeconform.tar.gz \
+            "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          tar -xzf kubeconform.tar.gz kubeconform
+          # Render with the optional features on so their templates are covered.
+          # -ignore-missing-schemas skips CRDs without published schemas (the
+          # ServiceMonitor); core types are still strictly validated.
+          helm template ci charts/debugsymd \
+            --set s3.bucket=ci-validation \
+            --set serviceMonitor.enabled=true \
+            --set networkPolicy.enabled=true \
+            --set ingress.enabled=true \
+            | ./kubeconform -strict -summary -ignore-missing-schemas
+
+  chart-publish:
+    # Package and push the chart as an OCI artifact to Docker Hub, only after the
+    # chart validates and only on pushes (main + version tags) — PRs have no
+    # registry creds.
+    needs: [chart-lint]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # OIDC: keyless cosign signing + provenance attestation
+      attestations: write # write the build-provenance attestation
+    env:
+      OCI_REPO: oci://registry-1.docker.io/bosiakov
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Log in to Docker Hub (Helm OCI)
+        run: |
+          echo "${{ secrets.DOCKERHUB_TOKEN }}" | helm registry login registry-1.docker.io \
+            --username "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
+
+      - name: Compute chart and app versions
+        id: ver
+        run: |
+          # Chart.yaml holds the base SemVer. Tags publish a clean release
+          # version; main publishes a prerelease (-dev.<sha>) so it never
+          # clobbers a released version. appVersion mirrors the image tag scheme.
+          base="$(helm show chart charts/debugsymd | awk '/^version:/{print $2}')"
+          app="sha-${GITHUB_SHA::12}"
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            chart="${GITHUB_REF_NAME#v}"
+            app="$GITHUB_REF_NAME"
+          else
+            chart="${base}-dev.${GITHUB_SHA::12}"
+          fi
+          echo "chart=${chart}" >> "$GITHUB_OUTPUT"
+          echo "app=${app}" >> "$GITHUB_OUTPUT"
+
+      - name: Package chart
+        id: pkg
+        run: |
+          helm package charts/debugsymd \
+            --version "${{ steps.ver.outputs.chart }}" \
+            --app-version "${{ steps.ver.outputs.app }}" \
+            --destination dist
+          echo "package=$(ls dist/*.tgz)" >> "$GITHUB_OUTPUT"
+
+      - name: Push chart (OCI) and capture digest
+        id: push
+        run: |
+          # helm push prints "Digest: sha256:..." on success; capture it to sign
+          # the immutable artifact rather than a mutable tag.
+          out="$(helm push "${{ steps.pkg.outputs.package }}" "${OCI_REPO}" 2>&1)"
+          echo "$out"
+          echo "digest=$(echo "$out" | awk '/Digest:/{print $2}')" >> "$GITHUB_OUTPUT"
+
+      - name: Sign chart (keyless, by digest)
+        run: cosign sign --yes "registry-1.docker.io/bosiakov/debugsymd@${{ steps.push.outputs.digest }}"
+
+      - name: Attest build provenance (SLSA)
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: registry-1.docker.io/bosiakov/debugsymd
+          subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true

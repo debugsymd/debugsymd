@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "debugsymd.fullname" . }}-test-connection
+  labels:
+    {{- include "debugsymd.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  containers:
+    - name: healthz
+      # The app image has no shell; use a curl image for the probe.
+      image: curlimages/curl:8.11.1
+      command: ["curl"]
+      args:
+        - --fail
+        - --silent
+        - --show-error
+        - http://{{ include "debugsymd.headlessName" . }}:{{ .Values.adminService.port }}/healthz
