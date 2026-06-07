@@ -238,11 +238,15 @@ jobs:
           echo "digest=$(echo "$out" | awk '/Digest:/{print $2}')" >> "$GITHUB_OUTPUT"
 
       - name: Sign chart (keyless, by digest)
-        run: cosign sign --yes "registry-1.docker.io/bosiakov/debugsymd@${{ steps.push.outputs.digest }}"
+        # Sign via the docker.io alias, not registry-1.docker.io: the Docker
+        # login stores creds under index.docker.io, which cosign resolves from
+        # docker.io but not from the registry-1 host (-> UNAUTHORIZED). Same
+        # repo and digest either way.
+        run: cosign sign --yes "docker.io/bosiakov/debugsymd@${{ steps.push.outputs.digest }}"
 
       - name: Attest build provenance (SLSA)
         uses: actions/attest-build-provenance@v2
         with:
-          subject-name: registry-1.docker.io/bosiakov/debugsymd
+          subject-name: docker.io/bosiakov/debugsymd
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
