@@ -1,0 +1,53 @@
+debugsymd has been deployed as a StatefulSet ({{ .Values.replicaCount }} replica(s)).
+
+Public symstore + debuginfod listener: port {{ .Values.service.port }}
+Admin (health/readiness/metrics):    port {{ .Values.adminService.port }}
+
+1. Reach the public symbol service:
+{{- if .Values.ingress.enabled }}
+{{- range .Values.ingress.hosts }}
+   http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}
+{{- end }}
+{{- else if eq .Values.service.type "LoadBalancer" }}
+   Wait for the LoadBalancer external IP:
+     kubectl get svc -n {{ .Release.Namespace }} {{ include "debugsymd.fullname" . }} -w
+{{- else }}
+   Port-forward the ClusterIP Service:
+     kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "debugsymd.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+{{- end }}
+
+2. Check health / readiness / metrics (admin port):
+     kubectl port-forward -n {{ .Release.Namespace }} sts/{{ include "debugsymd.fullname" . }} {{ .Values.adminService.port }}:{{ regexReplaceAll "^.*:" .Values.admin "" }}
+     curl http://127.0.0.1:{{ .Values.adminService.port }}/healthz
+     curl http://127.0.0.1:{{ .Values.adminService.port }}/readyz
+     curl http://127.0.0.1:{{ .Values.adminService.port }}/metrics
+
+   NOTE: /metrics serves the Prometheus exposition format (debugsymd_ series via
+   client_golang).
+{{- if .Values.serviceMonitor.enabled }}
+   A ServiceMonitor is enabled, scraping the admin Service every {{ .Values.serviceMonitor.interval }}.
+{{- else }}
+   Set serviceMonitor.enabled=true (Prometheus Operator) or scrape the admin port
+   directly. See chart README.
+{{- end }}
+
+3. AWS auth:
+{{- if .Values.aws.credentials.existingSecret }}
+   Using mounted credentials from Secret {{ .Values.aws.credentials.existingSecret | quote }}.
+{{- else if (index .Values.serviceAccount.annotations "eks.amazonaws.com/role-arn") }}
+   Using IRSA role {{ index .Values.serviceAccount.annotations "eks.amazonaws.com/role-arn" | quote }}.
+{{- else }}
+   Using the default AWS credential chain (instance role / env). Set
+   serviceAccount.annotations for IRSA or aws.credentials.existingSecret for a
+   mounted credentials file if needed.
+{{- end }}
+
+{{- if .Values.sentry.token.create }}
+
+WARNING: sentry.token.create=true stored the token in a chart-managed Secret.
+It is visible via `helm get values` and the release manifest. Prefer
+sentry.token.existingSecret with a Secret managed outside Helm for production.
+{{- end }}
+
+Run the bundled connectivity test:
+     helm test {{ .Release.Name }} -n {{ .Release.Namespace }}

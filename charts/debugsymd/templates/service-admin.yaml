@@ -1,0 +1,17 @@
+{{- if include "debugsymd.adminServiceEnabled" . }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "debugsymd.fullname" . }}-admin
+  labels:
+    {{- include "debugsymd.adminLabels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "debugsymd.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: admin
+      port: {{ .Values.adminService.port }}
+      targetPort: admin
+      protocol: TCP
+{{- end }}

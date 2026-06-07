@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "debugsymd values",
+  "type": "object",
+  "properties": {
+    "image": {
+      "type": "object",
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "tag": { "type": "string" },
+        "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] }
+      }
+    },
+    "replicaCount": { "type": "integer", "minimum": 0 },
+    "logLevel": { "type": "string", "enum": ["debug", "info", "warn", "error"] },
+    "debuginfod": { "type": "boolean" },
+    "cache": {
+      "type": "object",
+      "properties": {
+        "dir": { "type": "string", "minLength": 1 },
+        "maxUnusedFor": { "type": "string", "minLength": 1 }
+      }
+    },
+    "s3": {
+      "type": "object",
+      "properties": {
+        "bucket": { "type": "string" },
+        "region": { "type": "string" },
+        "endpointUrl": { "type": "string" },
+        "keyPrefix": { "type": "string" }
+      }
+    },
+    "sentry": {
+      "type": "object",
+      "properties": {
+        "apiUrl": { "type": "string" },
+        "org": { "type": "string" },
+        "project": { "type": "string" },
+        "token": {
+          "type": "object",
+          "properties": {
+            "create": { "type": "boolean" },
+            "value": { "type": "string" },
+            "existingSecret": { "type": "string" },
+            "key": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "persistence": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "storageClass": { "type": "string" },
+        "accessModes": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["ReadWriteOnce", "ReadWriteOncePod", "ReadWriteMany", "ReadOnlyMany"] }
+        },
+        "size": { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?(E|P|T|G|M|K|Ei|Pi|Ti|Gi|Mi|Ki)?$" }
+      }
+    },
+    "service": {
+      "type": "object",
+      "properties": {
+        "type": { "type": "string", "enum": ["ClusterIP", "LoadBalancer", "NodePort"] },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+      }
+    },
+    "ingress": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" }
+      }
+    },
+    "autoscaling": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "minReplicas": { "type": "integer", "minimum": 1 },
+        "maxReplicas": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "networkPolicy": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "publicIngress": { "type": "array" },
+        "adminIngress": { "type": "array" }
+      }
+    },
+    "goRuntime": {
+      "type": "object",
+      "properties": {
+        "memLimit": { "type": "string" },
+        "memLimitAuto": { "type": "boolean" },
+        "maxProcs": { "type": ["string", "integer"] }
+      }
+    },
+    "serviceMonitor": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "path": { "type": "string", "minLength": 1 },
+        "scheme": { "type": "string", "enum": ["http", "https"] },
+        "interval": { "type": "string" },
+        "scrapeTimeout": { "type": "string" },
+        "honorLabels": { "type": "boolean" },
+        "labels": { "type": "object" },
+        "namespace": { "type": "string" },
+        "namespaceSelector": { "type": "object" },
+        "relabelings": { "type": "array" },
+        "metricRelabelings": { "type": "array" }
+      }
+    }
+  }
+}
