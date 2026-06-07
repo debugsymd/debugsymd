@@ -208,26 +208,41 @@ func newRegistry() *prometheus.Registry {
 	return r
 }
 
-// setBuildInfo publishes the build_info series from the embedded build metadata
-// (module version and VCS revision are populated by `go build` with buildvcs).
-func setBuildInfo() {
+// BuildMetadata is the binary's version information, derived from the build info
+// that `go build` embeds (module version and VCS revision via buildvcs).
+type BuildMetadata struct {
+	Version   string
+	Revision  string
+	GoVersion string
+}
+
+// ReadBuild returns the binary's build metadata, falling back to "unknown" for
+// any field the build did not embed. It is the single source for both the
+// build_info metric and the startup log line.
+func ReadBuild() BuildMetadata {
 	const unknown = "unknown"
 
-	version, revision := unknown, unknown
+	b := BuildMetadata{Version: unknown, Revision: unknown, GoVersion: runtime.Version()}
 
 	if bi, ok := debug.ReadBuildInfo(); ok {
 		if bi.Main.Version != "" {
-			version = bi.Main.Version
+			b.Version = bi.Main.Version
 		}
 
 		for _, s := range bi.Settings {
 			if s.Key == "vcs.revision" {
-				revision = s.Value
+				b.Revision = s.Value
 			}
 		}
 	}
 
-	BuildInfo.WithLabelValues(version, revision, runtime.Version()).Set(1)
+	return b
+}
+
+// setBuildInfo publishes the build_info series from the embedded build metadata.
+func setBuildInfo() {
+	b := ReadBuild()
+	BuildInfo.WithLabelValues(b.Version, b.Revision, b.GoVersion).Set(1)
 }
 
 // Handler serves the registered collectors in the Prometheus exposition format.

@@ -17,6 +17,7 @@ import (
 	"github.com/debugsymd/debugsymd/config"
 	"github.com/debugsymd/debugsymd/diskcache"
 	"github.com/debugsymd/debugsymd/httpapi"
+	"github.com/debugsymd/debugsymd/metrics"
 	"github.com/debugsymd/debugsymd/objects"
 	"github.com/debugsymd/debugsymd/resolver"
 	"github.com/debugsymd/debugsymd/storage"
@@ -89,9 +90,12 @@ func run(args []string) error {
 	// clobbered by a late seed Set.
 	<-seeded
 
-	// #nosec G706 -- operator-supplied config logged as discrete slog fields
-	// (JSON-encoded), not request data spliced into a format string.
+	build := metrics.ReadBuild()
+
 	slog.Info("debugsymd starting",
+		"version", build.Version,
+		"revision", build.Revision,
+		"go_version", build.GoVersion,
 		"bind", cfg.Bind,
 		"admin", cfg.Admin,
 		"cache_dir", cfg.CacheDir,

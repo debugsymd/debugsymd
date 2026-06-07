@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"time"
 
@@ -35,10 +36,13 @@ func (s *Service) FetchCompressed(ctx context.Context, req resolver.Request) (*o
 
 	if file != nil {
 		metrics.CacheLookups.WithLabelValues(role, metrics.ResultHit).Inc()
+		slog.InfoContext(ctx, "compressed cache hit", "role", role, "id", id, "inner", inner)
+
 		return file, info, nil
 	}
 
 	metrics.CacheLookups.WithLabelValues(labelCompressed, metrics.ResultMiss).Inc()
+	slog.InfoContext(ctx, "compressed cache miss, producing", "id", id, "inner", inner)
 
 	// Produce it once across concurrent callers, then re-open whichever role the
 	// producer populated (raw_compressed if the upstream was a CAB, else cab_synth).
@@ -115,6 +119,8 @@ func (s *Service) synthesize(ctx context.Context, req resolver.Request) error {
 		}
 
 		role = roleRawCompressed
+
+		slog.InfoContext(ctx, "mirrored upstream cabinet", "filename", req.Filename, "size", info.Size())
 	} else {
 		synthStart := time.Now()
 
@@ -122,8 +128,15 @@ func (s *Service) synthesize(ctx context.Context, req resolver.Request) error {
 			return fmt.Errorf("synthesizing cabinet: %w", err)
 		}
 
-		metrics.CABSynthDuration.Observe(time.Since(synthStart).Seconds())
+		synthSeconds := time.Since(synthStart).Seconds()
+		metrics.CABSynthDuration.Observe(synthSeconds)
 		metrics.CABSynthBytesTotal.Add(float64(info.Size()))
+
+		slog.InfoContext(ctx, "synthesized cabinet",
+			"filename", req.Filename,
+			"size", info.Size(),
+			"synth_seconds", synthSeconds,
+		)
 	}
 
 	id, inner := cacheKey(req)

@@ -62,6 +62,14 @@ func (h *Handler) symstoreRoute(w http.ResponseWriter, r *http.Request) {
 		fetch = h.objects.FetchCompressed
 	}
 
+	slog.InfoContext(r.Context(), "symbol request",
+		"filename", req.Filename,
+		"debug_id", req.DebugID,
+		"code_id", req.CodeID,
+		"file_type", req.FileType,
+		"cab", serve.CAB,
+	)
+
 	file, info, err := fetch(r.Context(), req)
 	if err != nil {
 		h.fail(w, r, err)
@@ -90,8 +98,6 @@ func (h *Handler) fail(w http.ResponseWriter, r *http.Request, err error) {
 		return
 	}
 
-	// #nosec G706 -- path is a discrete slog field (JSON-encoded), not interpolated
-	// into a format string, so it cannot forge log entries.
 	slog.Error("symbol lookup failed", "error", err, "path", r.URL.Path)
 	w.Header().Set("Retry-After", retryAfterSeconds)
 	http.Error(w, "symbol backend unavailable", http.StatusServiceUnavailable)
